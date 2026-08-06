@@ -2,6 +2,8 @@
 
 Official Go SDK for the WWSrapport API.
 
+`DeriveBagReference`, `SearchRegistryByBag` and `GetReportVerification` expose the Solana attestation flow. `WebhookEvents` contains all 27 supported event types.
+
 ## Links
 
 - API overview and Swagger: https://wwsrapport.nl/api/docs
@@ -76,4 +78,3 @@ ok := wwsrapport.VerifyWebhookSignature(
 ```bash
 go test ./...
 ```
-

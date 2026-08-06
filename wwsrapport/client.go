@@ -79,6 +79,36 @@ func (c *Client) GetImprovementAdvice(ctx context.Context, reportID string) (jso
 	return c.doJSON(ctx, http.MethodGet, "/reports/"+url.PathEscape(reportID)+"/improvement-advice", nil, "", nil)
 }
 
+func (c *Client) GetReportVerification(ctx context.Context, reportID string) (json.RawMessage, error) {
+	return c.doJSON(ctx, http.MethodGet, "/reports/"+url.PathEscape(reportID)+"/verification", nil, "", nil)
+}
+
+func (c *Client) DeriveBagReference(ctx context.Context, bagVboID string) (json.RawMessage, error) {
+	if !validBagVboID(bagVboID) {
+		return nil, fmt.Errorf("wwsrapport: BAG verblijfsobject ID must contain exactly sixteen digits")
+	}
+	return c.doJSON(ctx, http.MethodPost, "/registry/bag-reference", map[string]string{"bagVboId": bagVboID}, "", nil)
+}
+
+func (c *Client) SearchRegistryByBag(ctx context.Context, bagVboID string) (json.RawMessage, error) {
+	if !validBagVboID(bagVboID) {
+		return nil, fmt.Errorf("wwsrapport: BAG verblijfsobject ID must contain exactly sixteen digits")
+	}
+	return c.doJSON(ctx, http.MethodPost, "/registry/search-by-bag", map[string]string{"bagVboId": bagVboID}, "", nil)
+}
+
+func validBagVboID(value string) bool {
+	if len(value) != 16 {
+		return false
+	}
+	for _, char := range value {
+		if char < '0' || char > '9' {
+			return false
+		}
+	}
+	return true
+}
+
 func (c *Client) ListDocuments(ctx context.Context, reportID string) (json.RawMessage, error) {
 	return c.doJSON(ctx, http.MethodGet, "/reports/"+url.PathEscape(reportID)+"/documents", nil, "", nil)
 }
@@ -201,4 +231,3 @@ func (c *Client) buildURL(path string, query url.Values) string {
 	}
 	return full
 }
-
