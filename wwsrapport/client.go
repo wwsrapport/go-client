@@ -14,7 +14,7 @@ import (
 
 const (
 	defaultBaseURL = "https://wwsrapport.nl/v1"
-	clientHeader  = "wwsrapport-go-client/0.1.0"
+	clientHeader  = "wwsrapport-go-client/0.2.0"
 )
 
 type Client struct {
