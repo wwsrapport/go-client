@@ -2,6 +2,11 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.3.0] - 2026-08-18
+
+- Added OAuth 2.0 client credentials and public-sector request context.
+- Added batch, human-review, tenant-export and offboarding resources.
+
 ## [0.2.1] - 2026-08-06
 
 ### Added

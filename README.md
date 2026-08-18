@@ -61,6 +61,13 @@ func main() {
 - WWS report and improvement advice PDF downloads
 - Usage and rulesets
 - Webhook endpoint management, test deliveries and retries
+- OAuth 2.0 client credentials alongside API keys
+- Public-sector request context (municipality, purpose, case and client reference)
+- Batch jobs, human review, tenant exports and controlled offboarding
+
+Use `NewOAuthClient` for client credentials and `WithRequestContext` to add the
+approved public-sector context to requests. Existing `NewClient` API-key integrations
+remain compatible.
 
 ## Webhooks
 

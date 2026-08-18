@@ -9,18 +9,40 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 )
 
 const (
 	defaultBaseURL = "https://wwsrapport.nl/v1"
-	clientHeader  = "wwsrapport-go-client/0.2.1"
+	clientHeader   = "wwsrapport-go-client/0.3.0"
 )
 
+type OAuthClientCredentials struct {
+	ClientID, ClientSecret, TokenURL string
+	Scopes                           []string
+}
+
+type RequestContext struct {
+	MunicipalityCode, PurposeCode, CaseReference, ClientReference string
+}
+
 type Client struct {
-	APIKey     string
-	BaseURL    string
-	HTTPClient *http.Client
+	APIKey         string
+	OAuth          *OAuthClientCredentials
+	RequestContext *RequestContext
+	BaseURL        string
+	HTTPClient     *http.Client
+	tokenMu        sync.Mutex
+	accessToken    string
+	tokenExpires   time.Time
+}
+
+func NewOAuthClient(oauth OAuthClientCredentials, requestContext *RequestContext, httpClient *http.Client) *Client {
+	if httpClient == nil {
+		httpClient = &http.Client{Timeout: 30 * time.Second}
+	}
+	return &Client{OAuth: &oauth, RequestContext: requestContext, BaseURL: defaultBaseURL, HTTPClient: httpClient}
 }
 
 type Error struct {
@@ -81,6 +103,38 @@ func (c *Client) GetImprovementAdvice(ctx context.Context, reportID string) (jso
 
 func (c *Client) GetReportVerification(ctx context.Context, reportID string) (json.RawMessage, error) {
 	return c.doJSON(ctx, http.MethodGet, "/reports/"+url.PathEscape(reportID)+"/verification", nil, "", nil)
+}
+
+func (c *Client) ReviewReport(ctx context.Context, reportID string, review any, idempotencyKey string) (json.RawMessage, error) {
+	return c.doJSON(ctx, http.MethodPost, "/reports/"+url.PathEscape(reportID)+"/human-review", review, idempotencyKey, nil)
+}
+
+func (c *Client) CreateBatch(ctx context.Context, input any, idempotencyKey string) (json.RawMessage, error) {
+	return c.doJSON(ctx, http.MethodPost, "/batches", input, idempotencyKey, nil)
+}
+
+func (c *Client) GetBatch(ctx context.Context, id string) (json.RawMessage, error) {
+	return c.doJSON(ctx, http.MethodGet, "/batches/"+url.PathEscape(id), nil, "", nil)
+}
+
+func (c *Client) RetryBatch(ctx context.Context, id, idempotencyKey string) (json.RawMessage, error) {
+	return c.doJSON(ctx, http.MethodPost, "/batches/"+url.PathEscape(id)+"/retry", nil, idempotencyKey, nil)
+}
+
+func (c *Client) RequestTenantExport(ctx context.Context, idempotencyKey string) (json.RawMessage, error) {
+	return c.doJSON(ctx, http.MethodPost, "/exports", nil, idempotencyKey, nil)
+}
+
+func (c *Client) GetTenantExport(ctx context.Context, id string) (json.RawMessage, error) {
+	return c.doJSON(ctx, http.MethodGet, "/exports/"+url.PathEscape(id), nil, "", nil)
+}
+
+func (c *Client) CreateTenantExportDownloadURL(ctx context.Context, id string) (json.RawMessage, error) {
+	return c.doJSON(ctx, http.MethodPost, "/exports/"+url.PathEscape(id)+"/download-url", nil, "", nil)
+}
+
+func (c *Client) RequestOffboarding(ctx context.Context, requestedByReference, reason string) (json.RawMessage, error) {
+	return c.doJSON(ctx, http.MethodPost, "/offboarding", map[string]string{"confirmation": "REQUEST_OFFBOARDING", "requested_by_reference": requestedByReference, "reason": reason}, "", nil)
 }
 
 func (c *Client) DeriveBagReference(ctx context.Context, bagVboID string) (json.RawMessage, error) {
@@ -174,8 +228,9 @@ func (c *Client) doJSON(ctx context.Context, method string, path string, body an
 }
 
 func (c *Client) doBytes(ctx context.Context, method string, path string, body any, idempotencyKey string, query url.Values, accept string) ([]byte, error) {
-	if strings.TrimSpace(c.APIKey) == "" {
-		return nil, fmt.Errorf("wwsrapport: API key is required")
+	token, err := c.bearerToken(ctx)
+	if err != nil {
+		return nil, err
 	}
 
 	var reader io.Reader
@@ -193,8 +248,9 @@ func (c *Client) doBytes(ctx context.Context, method string, path string, body a
 	}
 
 	request.Header.Set("Accept", accept)
-	request.Header.Set("Authorization", "Bearer "+c.APIKey)
+	request.Header.Set("Authorization", "Bearer "+token)
 	request.Header.Set("X-WWSrapport-Client", clientHeader)
+	c.applyRequestContext(request.Header)
 	if body != nil {
 		request.Header.Set("Content-Type", "application/json")
 	}
@@ -221,6 +277,79 @@ func (c *Client) doBytes(ctx context.Context, method string, path string, body a
 	}
 
 	return responseBody, nil
+}
+
+func (c *Client) bearerToken(ctx context.Context) (string, error) {
+	if strings.TrimSpace(c.APIKey) != "" {
+		return c.APIKey, nil
+	}
+	if c.OAuth == nil || strings.TrimSpace(c.OAuth.ClientID) == "" || strings.TrimSpace(c.OAuth.ClientSecret) == "" {
+		return "", fmt.Errorf("wwsrapport: API key or OAuth client credentials are required")
+	}
+	c.tokenMu.Lock()
+	defer c.tokenMu.Unlock()
+	if c.accessToken != "" && time.Now().Add(30*time.Second).Before(c.tokenExpires) {
+		return c.accessToken, nil
+	}
+	tokenURL := c.OAuth.TokenURL
+	if tokenURL == "" {
+		base, err := url.Parse(c.BaseURL)
+		if err != nil {
+			return "", err
+		}
+		base.Path, base.RawQuery = "/oauth/token", ""
+		tokenURL = base.String()
+	}
+	form := url.Values{"grant_type": {"client_credentials"}}
+	if len(c.OAuth.Scopes) > 0 {
+		form.Set("scope", strings.Join(c.OAuth.Scopes, " "))
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, tokenURL, strings.NewReader(form.Encode()))
+	if err != nil {
+		return "", err
+	}
+	req.SetBasicAuth(c.OAuth.ClientID, c.OAuth.ClientSecret)
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Accept", "application/json")
+	response, err := c.HTTPClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer response.Body.Close()
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		return "", err
+	}
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return "", &Error{StatusCode: response.StatusCode, RequestID: response.Header.Get("X-Request-Id"), Body: string(body)}
+	}
+	var payload struct {
+		AccessToken string `json:"access_token"`
+		ExpiresIn   int    `json:"expires_in"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return "", err
+	}
+	if payload.AccessToken == "" {
+		return "", fmt.Errorf("wwsrapport: OAuth response has no access_token")
+	}
+	if payload.ExpiresIn <= 0 {
+		payload.ExpiresIn = 300
+	}
+	c.accessToken, c.tokenExpires = payload.AccessToken, time.Now().Add(time.Duration(payload.ExpiresIn)*time.Second)
+	return c.accessToken, nil
+}
+
+func (c *Client) applyRequestContext(headers http.Header) {
+	if c.RequestContext == nil {
+		return
+	}
+	values := map[string]string{"X-WWS-Municipality-Code": c.RequestContext.MunicipalityCode, "X-WWS-Purpose-Code": c.RequestContext.PurposeCode, "X-WWS-Case-Reference": c.RequestContext.CaseReference, "X-WWS-Client-Reference": c.RequestContext.ClientReference}
+	for key, value := range values {
+		if strings.TrimSpace(value) != "" {
+			headers.Set(key, value)
+		}
+	}
 }
 
 func (c *Client) buildURL(path string, query url.Values) string {
